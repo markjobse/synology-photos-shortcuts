@@ -11,6 +11,7 @@ Synology didn’t add them. This extension does.
 - `Cmd + A` (Mac) / `Ctrl + A` (Windows): Select all
 - `Shift + Delete` / `Shift + Backspace`: Delete photo (with confirmation)
 - `Shift + R`: Rotate clockwise
+- `Shift + C`: Copy to
 - `Shift + D`: Download (original, not compressed)
 - `Shift + T`: Add tags
 - `Shift + A`: Add to album

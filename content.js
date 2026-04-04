@@ -1,9 +1,20 @@
 // Helper to find a button by selector and text
 function findButton(selector, text) {
+  const texts = Array.isArray(text) ? text : [text];
   const buttons = document.querySelectorAll(selector);
   for (const button of buttons) {
     const buttonText = button.querySelector('.button-text')?.textContent.trim();
-    if (buttonText === text) return button;
+    if (texts.includes(buttonText)) return button;
+  }
+  return null;
+}
+
+function findButtonByTooltip(selector, text) {
+  const texts = Array.isArray(text) ? text : [text];
+  const buttons = document.querySelectorAll(selector);
+  for (const button of buttons) {
+    const tooltip = button.getAttribute('data-tooltip-content')?.trim();
+    if (texts.includes(tooltip)) return button;
   }
   return null;
 }
@@ -16,7 +27,7 @@ function selectAll() {
   const allSelected = Array.from(checkboxes).every(cb => cb.classList.contains('checked'));
 
   if (allSelected) {
-    const deselectButton = document.querySelector('.synofoto-icon-button[data-tooltip-content="Cancel"]');
+    const deselectButton = document.querySelector('.synofoto-icon-button[data-tooltip-content="Annuleren"]');
     if (deselectButton) {
       deselectButton.click();
       return;
@@ -34,7 +45,7 @@ function addTags() {
   if (editTagsButton) {
     editTagsButton.click();
   } else {
-    const infoButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Information"]');
+    const infoButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Informatie"]');
     if (infoButton) {
       infoButton.click();
       setTimeout(() => {
@@ -47,35 +58,47 @@ function addTags() {
 
 // Action: Rotate (Shift + R)
 function rotate() {
-  const rotateButton = findButton('.synofoto-menu-text-button', 'Rotate');
+  const rotateButton = findButton('.synofoto-menu-text-button', 'Draaien');
   if (rotateButton) rotateButton.click();
 }
 
 // Action: Add to Album (Shift + A)
 function addToAlbum() {
-  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Add to Album"]');
+  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Toevoegen aan Album"]');
   if (selectionButton) {
     selectionButton.click();
   } else {
-    const lightboxButton = findButton('.synofoto-menu-text-button', 'Add to album');
+    const lightboxButton = findButton('.synofoto-menu-text-button', 'Toevoegen aan album');
+    if (lightboxButton) lightboxButton.click();
+  }
+}
+
+// Action: Copy To (Shift + C)
+function copyTo() {
+  const buttonTexts = ['Kopi\u00ebren naar', 'Copy to'];
+  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', buttonTexts);
+  if (selectionButton) {
+    selectionButton.click();
+  } else {
+    const lightboxButton = findButton('.synofoto-menu-text-button', buttonTexts);
     if (lightboxButton) lightboxButton.click();
   }
 }
 
 // Action: Open Delete Dialog (Shift + Delete or Shift + Back NORMSPACE)
 function deleteDialog() {
-  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Delete"]');
+  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Verwijderen"]');
   if (selectionButton) {
     selectionButton.click();
   } else {
-    const lightboxButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Delete"]');
+    const lightboxButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Verwijderen"]');
     if (lightboxButton) lightboxButton.click();
   }
 }
 
 // Action: Download (Shift + D)
 function download() {
-  const selectViewDownloadButton = findButton('.synofoto-menu-text-button', 'Original')
+  const selectViewDownloadButton = findButton('.synofoto-menu-text-button', 'Origineel')
   if (selectViewDownloadButton) {
     selectViewDownloadButton.click();
   }
@@ -103,6 +126,7 @@ const actions = {
   'T': addTags,
   'R': rotate,
   'A': addToAlbum,
+  'C': copyTo,
   'D': download,
   'Tab': changeView,
   'Delete': deleteDialog,
