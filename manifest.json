@@ -1,14 +1,15 @@
 {
   "name": "Synology Photos Shortcuts",
-  "description": "Shortcuts for Synology Photos: Select All, Delete, Rotate, Copy, Add Tags, Add to Album, Rating, and more.",
-  "version": "1.2",
+  "description": "Shortcuts for Synology Photos: Select All, Delete, Rotate, Copy, remember destinations, Add Tags, Add to Album, Rating, and more.",
+  "version": "1.9",
   "manifest_version": 3,
-    "icons": {
+  "icons": {
     "16": "images/icon16.png",
     "32": "images/icon32.png",
     "48": "images/icon48.png",
     "128": "images/icon128.png"
   },
+  "permissions": ["storage"],
   "content_scripts": [{
     "matches": ["<all_urls>"],
     "js": ["content.js"]
