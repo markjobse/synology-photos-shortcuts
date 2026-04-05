@@ -69,6 +69,7 @@ const destinationStorageKey = 'synologyPhotosShortcuts:lastDestinations:v1';
 const debugStorageKey = 'synologyPhotosShortcuts:debugMarker';
 const debugSelectionStorageKey = 'synologyPhotosShortcuts:debugSelection';
 const debugDialogStorageKey = 'synologyPhotosShortcuts:debugDialog';
+const debugBreadcrumbStorageKey = 'synologyPhotosShortcuts:debugBreadcrumbs';
 const destinationNavigatorSelector = '.synofoto-folder-navigator, .synofoto-folder-navigation-table';
 const destinationNavigatorItemSelector = [
   '[role="treeitem"]',
@@ -303,6 +304,65 @@ async function writeDialogDebug(reason, dialog, extra = {}) {
   });
 }
 
+function buildBreadcrumbDebugPayload(dialog, reason, extra = {}) {
+  const breadcrumbMeasures = Array.from(dialog.querySelectorAll('.synofoto-breadcrumbs-measure'))
+    .map((measure, measureIndex) => ({
+      measureIndex,
+      texts: Array.from(measure.children).map((child) => {
+        if (child.matches('.synofoto-menu-button')) {
+          return {
+            type: 'menu-button',
+            text: getButtonText(child.querySelector('.synofoto-breadcrumb-menu-button')),
+          };
+        }
+
+        if (child.matches('.synofoto-breadcrumbs-menu')) {
+          return {
+            type: 'breadcrumbs-menu',
+            text: normalizeText(
+              child.querySelector('.synofoto-breadcrumbs-link .button-text')?.textContent
+              || child.querySelector('.synofoto-breadcrumbs-link')?.textContent,
+            ),
+            active: Boolean(child.querySelector('.synofoto-breadcrumbs-link.activate')),
+          };
+        }
+
+        return {
+          type: child.className || child.tagName,
+          text: normalizeText(child.textContent),
+        };
+      }),
+    }));
+
+  const visibleMenuLists = Array.from(document.querySelectorAll('.synofoto-menu-list'))
+    .filter(menuList => isVisible(menuList))
+    .map((menuList, menuIndex) => ({
+      menuIndex,
+      id: menuList.id || null,
+      menuId: menuList.getAttribute('data-menu-id'),
+      texts: Array.from(menuList.querySelectorAll('.synofoto-menu-text-button'))
+        .map(button => getButtonText(button))
+        .filter(Boolean),
+    }));
+
+  return {
+    reason,
+    savedAt: new Date().toISOString(),
+    href: window.location.href,
+    resolvedPath: getDestinationBreadcrumbPath(dialog),
+    breadcrumbMeasures,
+    visibleMenuLists,
+    extra,
+  };
+}
+
+async function writeBreadcrumbDebug(dialog, reason, extra = {}) {
+  await saveToExtensionStorage(
+    debugBreadcrumbStorageKey,
+    buildBreadcrumbDebugPayload(dialog, reason, extra),
+  );
+}
+
 function getStoredDestination(type) {
   return destinationStore.values[getDestinationScope()]?.[type] || null;
 }
@@ -413,9 +473,10 @@ function findOpenDestinationDialogs() {
 }
 
 function getDestinationBreadcrumbPrefixSegments(dialog) {
-  const menuLists = Array.from(dialog.querySelectorAll('.synofoto-menu-list'))
+  const menuLists = Array.from(document.querySelectorAll('.synofoto-menu-list'))
     .filter(menuList => isVisible(menuList));
 
+  let firstNonEmptySegments = [];
   for (const menuList of menuLists) {
     const segments = dedupeTextList(
       Array.from(menuList.querySelectorAll('.synofoto-menu-text-button'))
@@ -423,12 +484,17 @@ function getDestinationBreadcrumbPrefixSegments(dialog) {
         .filter(text => text && text !== '...' && !isIgnoredDestinationText(text)),
     );
 
-    if (segments.length > 0) {
+    if (segments.length === 0) continue;
+    if (firstNonEmptySegments.length === 0) {
+      firstNonEmptySegments = segments;
+    }
+
+    if (segments.some(segment => isRootDestinationSegment(segment))) {
       return segments;
     }
   }
 
-  return [];
+  return firstNonEmptySegments;
 }
 
 function getDestinationBreadcrumbPath(dialog) {
@@ -731,6 +797,10 @@ function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
   if (!state) return;
 
   state.pendingSelectionLabel = normalizeText(preferredLabel);
+  void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-start', {
+    reason,
+    preferredLabel: state.pendingSelectionLabel,
+  });
 
   if (state.breadcrumbCaptureTimer) {
     window.clearTimeout(state.breadcrumbCaptureTimer);
@@ -745,6 +815,11 @@ function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
     if (capturedFromBreadcrumbs) {
       latestState.lastCapturedDestination = capturedFromBreadcrumbs;
       void persistCapturedDestination(dialog, capturedFromBreadcrumbs);
+      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-success', {
+        reason,
+        preferredLabel: latestState.pendingSelectionLabel,
+        destination: capturedFromBreadcrumbs,
+      });
       void writeSelectionDebug('breadcrumb-capture-success', dialog, latestState.lastInteractedCandidate, {
         reason,
         pendingSelectionLabel: latestState.pendingSelectionLabel,
@@ -764,12 +839,21 @@ function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
     if (fallbackDestination) {
       latestState.lastCapturedDestination = fallbackDestination;
       void persistCapturedDestination(dialog, fallbackDestination);
+      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-fallback', {
+        reason,
+        preferredLabel: latestState.pendingSelectionLabel,
+        destination: fallbackDestination,
+      });
       void writeSelectionDebug('breadcrumb-capture-fallback', dialog, latestState.lastInteractedCandidate, {
         reason,
         pendingSelectionLabel: latestState.pendingSelectionLabel,
         destination: fallbackDestination,
       });
     } else {
+      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-miss', {
+        reason,
+        preferredLabel: latestState.pendingSelectionLabel,
+      });
       void writeSelectionDebug('breadcrumb-capture-miss', dialog, latestState.lastInteractedCandidate, {
         reason,
         pendingSelectionLabel: latestState.pendingSelectionLabel,
