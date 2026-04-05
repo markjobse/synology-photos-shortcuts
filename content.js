@@ -122,6 +122,7 @@ const destinationIgnoredTexts = [
   'Annuleren',
   'Cancel',
 ];
+const destinationRootLabels = ['Root', 'All photos', 'All Photos'];
 
 const destinationStore = {
   values: {},
@@ -411,19 +412,18 @@ function findOpenDestinationDialogs() {
   return foundDialogs;
 }
 
-function getDestinationBreadcrumbPath(dialog) {
-  const breadcrumbContainers = dialog.querySelectorAll(
-    '[aria-label*="breadcrumb" i], [class*="breadcrumb"], nav[aria-label*="breadcrumb" i]',
-  );
+function getDestinationBreadcrumbPrefixSegments(dialog) {
+  const menuLists = Array.from(dialog.querySelectorAll('.synofoto-menu-list'))
+    .filter(menuList => isVisible(menuList));
 
-  for (const container of breadcrumbContainers) {
+  for (const menuList of menuLists) {
     const segments = dedupeTextList(
-      Array.from(container.querySelectorAll('button, [role="button"], a, span'))
-        .map(node => normalizeText(node.textContent))
-        .filter(text => text && !isIgnoredDestinationText(text)),
+      Array.from(menuList.querySelectorAll('.synofoto-menu-text-button'))
+        .map(button => getButtonText(button))
+        .filter(text => text && text !== '...' && !isIgnoredDestinationText(text)),
     );
 
-    if (segments.length > 0 && segments.length <= 8) {
+    if (segments.length > 0) {
       return segments;
     }
   }
@@ -431,15 +431,205 @@ function getDestinationBreadcrumbPath(dialog) {
   return [];
 }
 
+function getDestinationBreadcrumbPath(dialog) {
+  const breadcrumbMeasures = Array.from(dialog.querySelectorAll('.synofoto-breadcrumbs-measure'));
+
+  for (const measure of breadcrumbMeasures) {
+    const hasActiveBreadcrumb = Boolean(measure.querySelector('.synofoto-breadcrumbs-link.activate'));
+    if (!hasActiveBreadcrumb) continue;
+
+    const prefixSegments = getDestinationBreadcrumbPrefixSegments(dialog);
+    const segments = [];
+
+    Array.from(measure.children).forEach((child) => {
+      if (child.matches('.synofoto-menu-button')) {
+        const menuButton = child.querySelector('.synofoto-breadcrumb-menu-button');
+        const menuButtonText = getButtonText(menuButton);
+
+        if (menuButtonText === '...') {
+          segments.push(...prefixSegments);
+        } else if (menuButtonText && !isIgnoredDestinationText(menuButtonText)) {
+          segments.push(menuButtonText);
+        }
+
+        return;
+      }
+
+      if (!child.matches('.synofoto-breadcrumbs-menu')) return;
+
+      const breadcrumbLink = child.querySelector('.synofoto-breadcrumbs-link');
+      const breadcrumbText = normalizeText(
+        breadcrumbLink?.querySelector('.button-text')?.textContent
+        || breadcrumbLink?.textContent,
+      );
+
+      if (!breadcrumbText || breadcrumbText === '...' || isIgnoredDestinationText(breadcrumbText)) return;
+      segments.push(breadcrumbText);
+    });
+
+    const resolvedSegments = dedupeTextList(segments);
+    if (resolvedSegments.length > 0) {
+      return resolvedSegments;
+    }
+  }
+
+  return [];
+}
+
+function splitDestinationPath(value) {
+  return normalizeText(value)
+    .split(/[\\/]+/)
+    .map(segment => normalizeText(segment))
+    .filter(Boolean);
+}
+
+function isRootDestinationSegment(segment) {
+  return matchesAnyText(segment, destinationRootLabels);
+}
+
+function getDestinationPathSegments(destination) {
+  const pathSegments = Array.isArray(destination?.path)
+    ? destination.path.flatMap(segment => splitDestinationPath(segment))
+    : [];
+
+  const segments = dedupeTextList([
+    ...pathSegments,
+    destination?.label,
+  ]);
+
+  if (segments.length > 1 && isRootDestinationSegment(segments[0])) {
+    return segments.slice(1);
+  }
+
+  return segments;
+}
+
+function stripRootDestinationSegments(segments) {
+  if (segments.length > 1 && isRootDestinationSegment(segments[0])) {
+    return segments.slice(1);
+  }
+
+  return segments;
+}
+
+function getCurrentDestinationPathSegments(dialog) {
+  return stripRootDestinationSegments(
+    dedupeTextList(getDestinationBreadcrumbPath(dialog).flatMap(segment => splitDestinationPath(segment))),
+  );
+}
+
+function getCommonDestinationPathLength(left, right) {
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+
+  while (index < maxLength && normalizeKey(left[index]) === normalizeKey(right[index])) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function getDestinationCandidateLevel(element, dialog) {
+  const levelAttributes = [
+    element?.getAttribute?.('aria-level'),
+    element?.getAttribute?.('data-level'),
+    element?.getAttribute?.('data-depth'),
+  ];
+
+  for (const value of levelAttributes) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  let ancestorDepth = 0;
+  let parentCandidate = element?.parentElement?.closest?.(destinationCandidateSelector) || null;
+
+  while (parentCandidate && dialog.contains(parentCandidate)) {
+    ancestorDepth += 1;
+    parentCandidate = parentCandidate.parentElement?.closest?.(destinationCandidateSelector) || null;
+  }
+
+  if (ancestorDepth > 0) {
+    return ancestorDepth + 1;
+  }
+
+  const navigator = findDestinationNavigator(dialog);
+  if (navigator?.getAttribute('role') === 'tree') {
+    return 1;
+  }
+
+  return null;
+}
+
+function getDestinationPathFromVisibleLevels(dialog, element) {
+  const candidates = collectDestinationCandidates(dialog);
+  const candidateIndex = candidates.indexOf(element);
+  if (candidateIndex === -1) return [];
+
+  const currentLevel = getDestinationCandidateLevel(element, dialog);
+  if (!currentLevel || currentLevel <= 1) {
+    return [getElementText(element)].filter(Boolean);
+  }
+
+  const path = [getElementText(element)].filter(Boolean);
+  let targetLevel = currentLevel - 1;
+
+  for (let index = candidateIndex - 1; index >= 0 && targetLevel >= 1; index -= 1) {
+    const candidate = candidates[index];
+    const candidateLevel = getDestinationCandidateLevel(candidate, dialog);
+    if (!candidateLevel || candidateLevel !== targetLevel) continue;
+
+    path.unshift(getElementText(candidate));
+    targetLevel -= 1;
+  }
+
+  return path.filter(Boolean);
+}
+
+function getDestinationElementPath(dialog, element, label) {
+  const breadcrumbPath = getDestinationBreadcrumbPath(dialog);
+  const hierarchyPath = breadcrumbPath.length === 0
+    ? getDestinationPathFromVisibleLevels(dialog, element)
+    : [];
+
+  return dedupeTextList([
+    ...breadcrumbPath,
+    ...hierarchyPath,
+    ...splitDestinationPath(element.getAttribute?.('data-path')),
+    label,
+  ]);
+}
+
+function buildDestinationFromBreadcrumbs(dialog, preferredLabel = '') {
+  const breadcrumbPath = dedupeTextList(
+    getDestinationBreadcrumbPath(dialog).flatMap(segment => splitDestinationPath(segment)),
+  );
+  if (breadcrumbPath.length === 0) return null;
+
+  const expectedLabel = normalizeText(preferredLabel);
+  const lastSegment = breadcrumbPath[breadcrumbPath.length - 1] || expectedLabel;
+  const breadcrumbContainsExpected = !expectedLabel || breadcrumbPath.some(
+    segment => normalizeKey(segment) === normalizeKey(expectedLabel),
+  );
+
+  if (expectedLabel && !breadcrumbContainsExpected && normalizeKey(lastSegment) !== normalizeKey(expectedLabel)) {
+    return null;
+  }
+
+  return {
+    label: lastSegment,
+    path: breadcrumbPath,
+    savedAt: Date.now(),
+  };
+}
+
 function buildDestinationFromElement(dialog, element) {
   const label = getElementText(element);
   if (!label || isIgnoredDestinationText(label) || label.length > 120) return null;
 
-  const path = dedupeTextList([
-    ...getDestinationBreadcrumbPath(dialog),
-    ...normalizeText(element.getAttribute?.('data-path')).split('/'),
-    label,
-  ]);
+  const path = getDestinationElementPath(dialog, element, label);
 
   return {
     label,
@@ -530,9 +720,67 @@ async function persistCapturedDestination(dialog, destination) {
   if (areDestinationsEqual(storedDestination, destination)) return;
 
   await saveStoredDestination(state.type, destination);
+  state.pendingSelectionLabel = null;
   await writeSelectionDebug('persist-captured-destination', dialog, state.lastInteractedCandidate, {
     destination,
   });
+}
+
+function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
+  const state = destinationDialogState.get(dialog);
+  if (!state) return;
+
+  state.pendingSelectionLabel = normalizeText(preferredLabel);
+
+  if (state.breadcrumbCaptureTimer) {
+    window.clearTimeout(state.breadcrumbCaptureTimer);
+  }
+
+  let attempts = 0;
+  const tryCapture = () => {
+    const latestState = destinationDialogState.get(dialog);
+    if (!latestState || !document.contains(dialog)) return;
+
+    const capturedFromBreadcrumbs = buildDestinationFromBreadcrumbs(dialog, latestState.pendingSelectionLabel);
+    if (capturedFromBreadcrumbs) {
+      latestState.lastCapturedDestination = capturedFromBreadcrumbs;
+      void persistCapturedDestination(dialog, capturedFromBreadcrumbs);
+      void writeSelectionDebug('breadcrumb-capture-success', dialog, latestState.lastInteractedCandidate, {
+        reason,
+        pendingSelectionLabel: latestState.pendingSelectionLabel,
+        destination: capturedFromBreadcrumbs,
+      });
+      latestState.breadcrumbCaptureTimer = null;
+      return;
+    }
+
+    attempts += 1;
+    if (attempts < 8) {
+      latestState.breadcrumbCaptureTimer = window.setTimeout(tryCapture, 180);
+      return;
+    }
+
+    const fallbackDestination = captureSelectedDestination(dialog) || latestState.lastCapturedDestination;
+    if (fallbackDestination) {
+      latestState.lastCapturedDestination = fallbackDestination;
+      void persistCapturedDestination(dialog, fallbackDestination);
+      void writeSelectionDebug('breadcrumb-capture-fallback', dialog, latestState.lastInteractedCandidate, {
+        reason,
+        pendingSelectionLabel: latestState.pendingSelectionLabel,
+        destination: fallbackDestination,
+      });
+    } else {
+      void writeSelectionDebug('breadcrumb-capture-miss', dialog, latestState.lastInteractedCandidate, {
+        reason,
+        pendingSelectionLabel: latestState.pendingSelectionLabel,
+        currentBreadcrumbs: getDestinationBreadcrumbPath(dialog),
+      });
+    }
+
+    latestState.breadcrumbCaptureTimer = null;
+  };
+
+  state.breadcrumbCaptureTimer = window.setTimeout(tryCapture, 150);
 }
 
 function scheduleDestinationCapture(dialog, delay = 120, options = {}) {
@@ -559,11 +807,14 @@ async function persistDestinationFromDialog(dialog) {
   const state = destinationDialogState.get(dialog);
   if (!state) return;
 
-  state.lastCapturedDestination = captureSelectedDestination(dialog) || state.lastCapturedDestination;
+  state.lastCapturedDestination = buildDestinationFromBreadcrumbs(dialog, state.pendingSelectionLabel)
+    || captureSelectedDestination(dialog)
+    || state.lastCapturedDestination;
   if (!state.lastCapturedDestination) return;
 
   await destinationStore.ready;
   await saveStoredDestination(state.type, state.lastCapturedDestination);
+  state.pendingSelectionLabel = null;
   await writeSelectionDebug('persist-on-confirm', dialog, state.lastInteractedCandidate, {
     destination: state.lastCapturedDestination,
   });
@@ -579,7 +830,8 @@ async function restoreDestinationForDialog(dialog) {
   if (!storedDestination) return;
 
   let attempts = 0;
-  const labelsToRestore = getRestoreLabels(storedDestination);
+  const restoreSegments = getDestinationPathSegments(storedDestination);
+  if (restoreSegments.length === 0) return;
 
   const tryRestore = () => {
     if (!document.contains(dialog)) return;
@@ -589,29 +841,68 @@ async function restoreDestinationForDialog(dialog) {
 
     latestState.restoreInProgress = true;
 
+    const currentPath = getCurrentDestinationPathSegments(dialog);
     const currentSelection = captureSelectedDestination(dialog);
-    if (currentSelection && normalizeKey(currentSelection.label) === normalizeKey(storedDestination.label)) {
+    const currentPathLength = getCommonDestinationPathLength(currentPath, restoreSegments);
+    const currentPathMatchesTarget = currentPathLength === restoreSegments.length
+      && currentPath.length === restoreSegments.length;
+
+    if (
+      currentPathMatchesTarget
+      || (currentSelection && normalizeKey(currentSelection.label) === normalizeKey(storedDestination.label))
+    ) {
       latestState.restoreComplete = true;
       latestState.restoreInProgress = false;
+      void writeSelectionDebug('restore-already-selected', dialog, latestState.lastInteractedCandidate, {
+        destination: storedDestination,
+        restoreSegments,
+        currentPath,
+      });
       return;
     }
 
-    for (const label of labelsToRestore) {
-      const candidate = findDestinationCandidateByLabel(dialog, label);
-      if (!candidate) continue;
+    const nextSegmentIndex = Math.min(currentPathLength, restoreSegments.length - 1);
+    const nextSegment = restoreSegments[nextSegmentIndex];
+    const candidate = findDestinationCandidateByLabel(dialog, nextSegment);
 
+    if (candidate) {
+      latestState.lastInteractedCandidate = candidate;
       candidate.click();
       latestState.lastCapturedDestination = buildDestinationFromElement(dialog, candidate) || latestState.lastCapturedDestination;
 
-      if (normalizeKey(getElementText(candidate)) === normalizeKey(storedDestination.label)) {
+      void writeSelectionDebug('restore-segment-click', dialog, candidate, {
+        destination: storedDestination,
+        restoreSegments,
+        currentPath,
+        nextSegmentIndex,
+        nextSegment,
+      });
+
+      attempts = 0;
+
+      if (nextSegmentIndex >= restoreSegments.length - 1) {
         latestState.restoreComplete = true;
+        latestState.restoreInProgress = false;
+        return;
       }
 
-      break;
+      window.setTimeout(tryRestore, 350);
+      return;
     }
 
+    void writeSelectionDebug('restore-segment-miss', dialog, latestState.lastInteractedCandidate, {
+      destination: storedDestination,
+      restoreSegments,
+      currentPath,
+      nextSegmentIndex,
+      nextSegment,
+      visibleCandidates: collectDestinationCandidates(dialog)
+        .slice(0, 12)
+        .map(candidateElement => getElementText(candidateElement)),
+    });
+
     attempts += 1;
-    if (!latestState.restoreComplete && attempts < 12) {
+    if (!latestState.restoreComplete && attempts < 14) {
       window.setTimeout(tryRestore, 250);
       return;
     }
@@ -630,18 +921,19 @@ function handleDestinationDialogClick(dialog, event) {
   if (navigator && navigator.contains(event.target)) {
     const navigatorCandidate = event.target.closest(destinationNavigatorItemSelector);
     if (navigatorCandidate && isDestinationCandidate(navigatorCandidate, dialog)) {
+      const clickedLabel = getElementText(navigatorCandidate);
       state.lastInteractedCandidate = navigatorCandidate;
-      state.lastCapturedDestination = buildDestinationFromElement(dialog, navigatorCandidate) || state.lastCapturedDestination;
+      state.pendingSelectionLabel = clickedLabel;
       void writeSelectionDebug('navigator-item-click', dialog, navigatorCandidate, {
-        destination: state.lastCapturedDestination,
+        clickedLabel,
       });
+      scheduleBreadcrumbDestinationCapture(dialog, clickedLabel, 'navigator-item-click');
     } else {
       void writeSelectionDebug('navigator-non-item-click', dialog, event.target, {
         targetTagName: event.target?.tagName || null,
       });
     }
-
-    scheduleDestinationCapture(dialog, 150, { persist: true });
+    return;
   }
 
   const clickedControl = event.target.closest(destinationCandidateSelector);
@@ -657,12 +949,13 @@ function handleDestinationDialogClick(dialog, event) {
 
   if (!isDestinationCandidate(clickedControl, dialog)) return;
 
+  const clickedLabel = getElementText(clickedControl);
   state.lastInteractedCandidate = clickedControl;
-  state.lastCapturedDestination = buildDestinationFromElement(dialog, clickedControl) || state.lastCapturedDestination;
+  state.pendingSelectionLabel = clickedLabel;
   void writeSelectionDebug('generic-candidate-click', dialog, clickedControl, {
-    destination: state.lastCapturedDestination,
+    clickedLabel,
   });
-  scheduleDestinationCapture(dialog, 120, { persist: true });
+  scheduleBreadcrumbDestinationCapture(dialog, clickedLabel, 'generic-candidate-click');
 }
 
 function wireDestinationDialog(dialog, type) {
@@ -671,9 +964,11 @@ function wireDestinationDialog(dialog, type) {
   observedDestinationDialogs.add(dialog);
   destinationDialogState.set(dialog, {
     type,
+    breadcrumbCaptureTimer: null,
     captureTimer: null,
     lastCapturedDestination: null,
     lastInteractedCandidate: null,
+    pendingSelectionLabel: null,
     restoreComplete: false,
     restoreInProgress: false,
   });
@@ -687,10 +982,13 @@ function wireDestinationDialog(dialog, type) {
       navigatorIsActive
       && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)
     ) {
+      const activeLabel = getElementText(document.activeElement);
+      state.pendingSelectionLabel = activeLabel;
       void writeSelectionDebug('navigator-keydown', dialog, document.activeElement, {
         key: event.key,
+        activeLabel,
       });
-      scheduleDestinationCapture(dialog, 180, { persist: true });
+      scheduleBreadcrumbDestinationCapture(dialog, activeLabel, 'navigator-keydown');
     }
 
     if (event.key === 'Enter') {
