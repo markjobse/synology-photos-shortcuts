@@ -91,18 +91,6 @@ function getDestinationScrollContainers(dialog) {
   return containers;
 }
 
-function describeDestinationScrollContainer(container) {
-  if (!container) return null;
-
-  return {
-    tagName: container.tagName,
-    classes: getElementClasses(container),
-    scrollTop: container.scrollTop,
-    clientHeight: container.clientHeight,
-    scrollHeight: container.scrollHeight,
-  };
-}
-
 // Helper to find a button by selector and text
 function findButton(selector, text) {
   const texts = Array.isArray(text) ? text : [text];
@@ -125,7 +113,7 @@ function findButtonByTooltip(selector, text) {
 
 const destinationDialogConfigs = {
   copy: {
-    confirmTexts: ['Kopiëren naar', 'Copy to'],
+    confirmTexts: ['Kopieren naar', 'Kopiëren naar', 'Copy to'],
   },
   move: {
     confirmTexts: ['Verplaatsen naar', 'Move to'],
@@ -133,11 +121,13 @@ const destinationDialogConfigs = {
 };
 
 const destinationStorageKey = 'synologyPhotosShortcuts:lastDestinations:v1';
-const debugStorageKey = 'synologyPhotosShortcuts:debugMarker';
-const debugSelectionStorageKey = 'synologyPhotosShortcuts:debugSelection';
-const debugDialogStorageKey = 'synologyPhotosShortcuts:debugDialog';
-const debugBreadcrumbStorageKey = 'synologyPhotosShortcuts:debugBreadcrumbs';
-const debugRestoreStorageKey = 'synologyPhotosShortcuts:debugRestore';
+const legacyDebugStorageKeys = [
+  'synologyPhotosShortcuts:debugMarker',
+  'synologyPhotosShortcuts:debugSelection',
+  'synologyPhotosShortcuts:debugDialog',
+  'synologyPhotosShortcuts:debugBreadcrumbs',
+  'synologyPhotosShortcuts:debugRestore',
+];
 const destinationNavigatorSelector = '.synofoto-folder-navigator, .synofoto-folder-navigation-table';
 const destinationNavigatorItemSelector = [
   '[role="treeitem"]',
@@ -184,14 +174,22 @@ const destinationSelectionSelector = [
   '.current',
 ].join(', ');
 const destinationIgnoredTexts = [
-  'Kopiëren naar',
-  'Copy to',
-  'Verplaatsen naar',
-  'Move to',
+  ...destinationDialogConfigs.copy.confirmTexts,
+  ...destinationDialogConfigs.move.confirmTexts,
   'Annuleren',
   'Cancel',
 ];
-const destinationRootLabels = ['Root', 'All photos', 'All Photos'];
+const destinationRootLabels = ['Root', 'All photos', 'All Photos', "Alle foto's"];
+const actionTexts = {
+  cancel: ['Annuleren', 'Cancel'],
+  editTags: ['Tags bewerken', 'Bewerk tags', 'Edit tags'],
+  information: ['Informatie', 'Information', 'Info'],
+  rotate: ['Draaien', 'Rotate'],
+  addToAlbum: ['Toevoegen aan Album', 'Toevoegen aan album', 'Add to Album', 'Add to album'],
+  copyTo: destinationDialogConfigs.copy.confirmTexts,
+  delete: ['Verwijderen', 'Delete'],
+  original: ['Origineel', 'Original'],
+};
 
 const destinationStore = {
   values: {},
@@ -292,162 +290,34 @@ function persistStoredDestinations() {
   return Promise.resolve();
 }
 
-function saveToExtensionStorage(key, value) {
+function removeFromWindowStorage(keys) {
+  keys.forEach((key) => {
+    try {
+      window.localStorage.removeItem(key);
+    } catch (_error) {
+      // Ignore storage cleanup errors.
+    }
+  });
+}
+
+function cleanupLegacyDebugStorage() {
+  removeFromWindowStorage(legacyDebugStorageKeys);
+
   if (canUseExtensionStorage()) {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.set({ [key]: value }, () => {
-          if (chrome.runtime?.lastError) {
-            writeToWindowStorage(key, value);
-          }
-
+        chrome.storage.local.remove(legacyDebugStorageKeys, () => {
+          removeFromWindowStorage(legacyDebugStorageKeys);
           resolve();
         });
       } catch (_error) {
-        writeToWindowStorage(key, value);
+        removeFromWindowStorage(legacyDebugStorageKeys);
         resolve();
       }
     });
   }
 
-  writeToWindowStorage(key, value);
   return Promise.resolve();
-}
-
-function writeDebugStorageMarker() {
-  const randomValue = `debug-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-
-  return saveToExtensionStorage(debugStorageKey, {
-    value: randomValue,
-    savedAt: new Date().toISOString(),
-    href: window.location.href,
-  });
-}
-
-function getElementClasses(element) {
-  if (!element?.classList) return [];
-  return Array.from(element.classList);
-}
-
-function getElementDataset(element) {
-  if (!element?.dataset) return {};
-  return { ...element.dataset };
-}
-
-function buildSelectionDebugPayload(reason, dialog, candidate, extra = {}) {
-  return {
-    reason,
-    savedAt: new Date().toISOString(),
-    href: window.location.href,
-    candidateText: getElementText(candidate),
-    candidateClasses: getElementClasses(candidate),
-    candidateDataset: getElementDataset(candidate),
-    candidateAriaSelected: candidate?.getAttribute?.('aria-selected') || null,
-    candidateAriaChecked: candidate?.getAttribute?.('aria-checked') || null,
-    candidateDataPath: candidate?.getAttribute?.('data-path') || null,
-    navigatorFound: Boolean(findDestinationNavigator(dialog)),
-    dialogType: destinationDialogState.get(dialog)?.type || null,
-    extra,
-  };
-}
-
-async function writeSelectionDebug(reason, dialog, candidate, extra = {}) {
-  await saveToExtensionStorage(
-    debugSelectionStorageKey,
-    buildSelectionDebugPayload(reason, dialog, candidate, extra),
-  );
-}
-
-async function writeDialogDebug(reason, dialog, extra = {}) {
-  await saveToExtensionStorage(debugDialogStorageKey, {
-    reason,
-    savedAt: new Date().toISOString(),
-    href: window.location.href,
-    dialogType: destinationDialogState.get(dialog)?.type || inferDestinationDialogType(dialog),
-    dialogClasses: getElementClasses(dialog),
-    dialogText: normalizeText(dialog.textContent).slice(0, 400),
-    navigatorFound: Boolean(findDestinationNavigator(dialog)),
-    navigatorSelector: destinationNavigatorSelector,
-    extra,
-  });
-}
-
-function buildBreadcrumbDebugPayload(dialog, reason, extra = {}) {
-  const breadcrumbMeasures = Array.from(dialog.querySelectorAll('.synofoto-breadcrumbs-measure'))
-    .map((measure, measureIndex) => ({
-      measureIndex,
-      texts: Array.from(measure.children).map((child) => {
-        if (child.matches('.synofoto-menu-button')) {
-          return {
-            type: 'menu-button',
-            text: getButtonText(child.querySelector('.synofoto-breadcrumb-menu-button')),
-          };
-        }
-
-        if (child.matches('.synofoto-breadcrumbs-menu')) {
-          return {
-            type: 'breadcrumbs-menu',
-            text: normalizeText(
-              child.querySelector('.synofoto-breadcrumbs-link .button-text')?.textContent
-              || child.querySelector('.synofoto-breadcrumbs-link')?.textContent,
-            ),
-            active: Boolean(child.querySelector('.synofoto-breadcrumbs-link.activate')),
-          };
-        }
-
-        return {
-          type: child.className || child.tagName,
-          text: normalizeText(child.textContent),
-        };
-      }),
-    }));
-
-  const visibleMenuLists = Array.from(document.querySelectorAll('.synofoto-menu-list'))
-    .filter(menuList => isVisible(menuList))
-    .map((menuList, menuIndex) => ({
-      menuIndex,
-      id: menuList.id || null,
-      menuId: menuList.getAttribute('data-menu-id'),
-      texts: Array.from(menuList.querySelectorAll('.synofoto-menu-text-button'))
-        .map(button => getButtonText(button))
-        .filter(Boolean),
-    }));
-
-  return {
-    reason,
-    savedAt: new Date().toISOString(),
-    href: window.location.href,
-    resolvedPath: getDestinationBreadcrumbPath(dialog),
-    breadcrumbMeasures,
-    visibleMenuLists,
-    extra,
-  };
-}
-
-async function writeBreadcrumbDebug(dialog, reason, extra = {}) {
-  await saveToExtensionStorage(
-    debugBreadcrumbStorageKey,
-    buildBreadcrumbDebugPayload(dialog, reason, extra),
-  );
-}
-
-async function writeRestoreDebug(dialog, reason, extra = {}) {
-  await saveToExtensionStorage(debugRestoreStorageKey, {
-    reason,
-    savedAt: new Date().toISOString(),
-    href: window.location.href,
-    currentPath: getCurrentDestinationPathSegments(dialog),
-    breadcrumbPath: getDestinationBreadcrumbPath(dialog),
-    selectedDestination: captureSelectedDestination(dialog),
-    visibleCandidates: collectDestinationCandidates(dialog)
-      .slice(0, 15)
-      .map(candidateElement => ({
-        text: getElementText(candidateElement),
-        variants: getElementTextVariants(candidateElement),
-        classes: getElementClasses(candidateElement),
-      })),
-    extra,
-  });
 }
 
 function getStoredDestination(type) {
@@ -875,13 +745,6 @@ async function findDestinationCandidateByLabelWithScroll(dialog, label) {
     return null;
   }
 
-  const normalizedLabel = normalizeKey(label);
-  const searchSummary = {
-    label,
-    scrollContainers: scrollContainers.map(container => describeDestinationScrollContainer(container)),
-    passes: [],
-  };
-
   for (const container of scrollContainers) {
     const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
     if (maxScrollTop <= 0) continue;
@@ -897,21 +760,11 @@ async function findDestinationCandidateByLabelWithScroll(dialog, label) {
       container.scrollTop = boundedScrollTop;
       container.dispatchEvent(new Event('scroll', { bubbles: true }));
       await waitForDelay(150);
-
-      searchSummary.passes.push({
-        scrollTop: container.scrollTop,
-        visibleCandidateCount: collectDestinationCandidates(dialog).length,
-      });
     };
 
     await visitPosition(0);
     let candidate = findDestinationCandidateByLabel(dialog, label);
     if (candidate) {
-      void writeRestoreDebug(dialog, 'restore-scroll-scan-found', {
-        label,
-        normalizedLabel,
-        searchSummary,
-      });
       return candidate;
     }
 
@@ -921,29 +774,12 @@ async function findDestinationCandidateByLabelWithScroll(dialog, label) {
 
       candidate = findDestinationCandidateByLabel(dialog, label);
       if (candidate) {
-        void writeRestoreDebug(dialog, 'restore-scroll-scan-found', {
-          label,
-          normalizedLabel,
-          searchSummary,
-        });
         return candidate;
       }
     }
   }
 
-  void writeRestoreDebug(dialog, 'restore-scroll-scan-miss', {
-    label,
-    normalizedLabel,
-    searchSummary,
-  });
   return null;
-}
-
-function getRestoreLabels(destination) {
-  return dedupeTextList([
-    ...(Array.isArray(destination?.path) ? destination.path : []),
-    destination?.label,
-  ]);
 }
 
 async function persistCapturedDestination(dialog, destination) {
@@ -957,20 +793,13 @@ async function persistCapturedDestination(dialog, destination) {
 
   await saveStoredDestination(state.type, destination);
   state.pendingSelectionLabel = null;
-  await writeSelectionDebug('persist-captured-destination', dialog, state.lastInteractedCandidate, {
-    destination,
-  });
 }
 
-function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
+function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel) {
   const state = destinationDialogState.get(dialog);
   if (!state) return;
 
   state.pendingSelectionLabel = normalizeText(preferredLabel);
-  void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-start', {
-    reason,
-    preferredLabel: state.pendingSelectionLabel,
-  });
 
   if (state.breadcrumbCaptureTimer) {
     window.clearTimeout(state.breadcrumbCaptureTimer);
@@ -985,16 +814,6 @@ function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
     if (capturedFromBreadcrumbs) {
       latestState.lastCapturedDestination = capturedFromBreadcrumbs;
       void persistCapturedDestination(dialog, capturedFromBreadcrumbs);
-      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-success', {
-        reason,
-        preferredLabel: latestState.pendingSelectionLabel,
-        destination: capturedFromBreadcrumbs,
-      });
-      void writeSelectionDebug('breadcrumb-capture-success', dialog, latestState.lastInteractedCandidate, {
-        reason,
-        pendingSelectionLabel: latestState.pendingSelectionLabel,
-        destination: capturedFromBreadcrumbs,
-      });
       latestState.breadcrumbCaptureTimer = null;
       return;
     }
@@ -1009,26 +828,6 @@ function scheduleBreadcrumbDestinationCapture(dialog, preferredLabel, reason) {
     if (fallbackDestination) {
       latestState.lastCapturedDestination = fallbackDestination;
       void persistCapturedDestination(dialog, fallbackDestination);
-      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-fallback', {
-        reason,
-        preferredLabel: latestState.pendingSelectionLabel,
-        destination: fallbackDestination,
-      });
-      void writeSelectionDebug('breadcrumb-capture-fallback', dialog, latestState.lastInteractedCandidate, {
-        reason,
-        pendingSelectionLabel: latestState.pendingSelectionLabel,
-        destination: fallbackDestination,
-      });
-    } else {
-      void writeBreadcrumbDebug(dialog, 'breadcrumb-capture-miss', {
-        reason,
-        preferredLabel: latestState.pendingSelectionLabel,
-      });
-      void writeSelectionDebug('breadcrumb-capture-miss', dialog, latestState.lastInteractedCandidate, {
-        reason,
-        pendingSelectionLabel: latestState.pendingSelectionLabel,
-        currentBreadcrumbs: getDestinationBreadcrumbPath(dialog),
-      });
     }
 
     latestState.breadcrumbCaptureTimer = null;
@@ -1069,9 +868,6 @@ async function persistDestinationFromDialog(dialog) {
   await destinationStore.ready;
   await saveStoredDestination(state.type, state.lastCapturedDestination);
   state.pendingSelectionLabel = null;
-  await writeSelectionDebug('persist-on-confirm', dialog, state.lastInteractedCandidate, {
-    destination: state.lastCapturedDestination,
-  });
 }
 
 async function restoreDestinationForDialog(dialog) {
@@ -1118,15 +914,6 @@ async function restoreDestinationForDialog(dialog) {
           latestState.restoreConfirmedPrefixLength || 0,
           currentPathLength,
         );
-        void writeRestoreDebug(dialog, 'restore-progress-detected', {
-          clickedSegmentIndex,
-          clickedSegment,
-          baselinePath,
-          currentPath,
-          currentSelection,
-          pathChanged,
-          confirmedPrefixLength: latestState.restoreConfirmedPrefixLength,
-        });
         scheduleTryRestore(250);
         return;
       }
@@ -1137,15 +924,6 @@ async function restoreDestinationForDialog(dialog) {
         return;
       }
 
-      void writeRestoreDebug(dialog, 'restore-no-progress', {
-        clickedSegmentIndex,
-        clickedSegment,
-        baselinePath,
-        currentPath,
-        currentSelection,
-        pathChanged,
-        confirmedPrefixLength: latestState.restoreConfirmedPrefixLength || 0,
-      });
       scheduleTryRestore(700);
     };
 
@@ -1173,27 +951,11 @@ async function restoreDestinationForDialog(dialog) {
     ) {
       latestState.restoreComplete = true;
       latestState.restoreInProgress = false;
-      void writeSelectionDebug('restore-already-selected', dialog, latestState.lastInteractedCandidate, {
-        destination: storedDestination,
-        restoreSegments,
-        currentPath,
-        confirmedPrefixLength,
-      });
       return;
     }
 
     const nextSegmentIndex = Math.min(confirmedPrefixLength, restoreSegments.length - 1);
     const nextSegment = restoreSegments[nextSegmentIndex];
-    void writeRestoreDebug(dialog, 'restore-attempt', {
-      destination: storedDestination,
-      restoreSegments,
-      currentPath,
-      currentPathLength,
-      confirmedPrefixLength,
-      nextSegmentIndex,
-      nextSegment,
-      attempts,
-    });
     const candidate = await findDestinationCandidateByLabelWithScroll(dialog, nextSegment);
     const refreshedState = destinationDialogState.get(dialog);
 
@@ -1214,23 +976,6 @@ async function restoreDestinationForDialog(dialog) {
       candidate.click();
       refreshedState.lastCapturedDestination = buildDestinationFromElement(dialog, candidate) || refreshedState.lastCapturedDestination;
 
-      void writeRestoreDebug(dialog, 'restore-segment-click', {
-        destination: storedDestination,
-        restoreSegments,
-        currentPath,
-        currentPathLength,
-        confirmedPrefixLength,
-        nextSegmentIndex,
-        nextSegment,
-      });
-      void writeSelectionDebug('restore-segment-click', dialog, candidate, {
-        destination: storedDestination,
-        restoreSegments,
-        currentPath,
-        nextSegmentIndex,
-        nextSegment,
-      });
-
       attempts = 0;
       refreshedState.restoreInProgress = false;
       waitForRestoreProgress(nextSegmentIndex, nextSegment, currentPath);
@@ -1240,38 +985,9 @@ async function restoreDestinationForDialog(dialog) {
     if (currentPathLength > confirmedPrefixLength) {
       refreshedState.restoreConfirmedPrefixLength = currentPathLength;
       refreshedState.restoreInProgress = false;
-      void writeRestoreDebug(dialog, 'restore-adopt-current-path', {
-        destination: storedDestination,
-        restoreSegments,
-        currentPath,
-        currentPathLength,
-        confirmedPrefixLength,
-        adoptedPrefixLength: currentPathLength,
-      });
       scheduleTryRestore(250);
       return;
     }
-
-    void writeRestoreDebug(dialog, 'restore-segment-miss', {
-      destination: storedDestination,
-      restoreSegments,
-      currentPath,
-      currentPathLength,
-      confirmedPrefixLength,
-      nextSegmentIndex,
-      nextSegment,
-      attempts,
-    });
-    void writeSelectionDebug('restore-segment-miss', dialog, refreshedState.lastInteractedCandidate, {
-      destination: storedDestination,
-      restoreSegments,
-      currentPath,
-      nextSegmentIndex,
-      nextSegment,
-      visibleCandidates: collectDestinationCandidates(dialog)
-        .slice(0, 12)
-        .map(candidateElement => getElementText(candidateElement)),
-    });
 
     attempts += 1;
     if (!refreshedState.restoreComplete && attempts < 14) {
@@ -1281,12 +997,6 @@ async function restoreDestinationForDialog(dialog) {
     }
 
     refreshedState.restoreInProgress = false;
-    void writeRestoreDebug(dialog, 'restore-give-up', {
-      destination: storedDestination,
-      restoreSegments,
-      currentPath,
-      attempts,
-    });
   };
 
   scheduleTryRestore(250);
@@ -1303,14 +1013,7 @@ function handleDestinationDialogClick(dialog, event) {
       const clickedLabel = getElementText(navigatorCandidate);
       state.lastInteractedCandidate = navigatorCandidate;
       state.pendingSelectionLabel = clickedLabel;
-      void writeSelectionDebug('navigator-item-click', dialog, navigatorCandidate, {
-        clickedLabel,
-      });
-      scheduleBreadcrumbDestinationCapture(dialog, clickedLabel, 'navigator-item-click');
-    } else {
-      void writeSelectionDebug('navigator-non-item-click', dialog, event.target, {
-        targetTagName: event.target?.tagName || null,
-      });
+      scheduleBreadcrumbDestinationCapture(dialog, clickedLabel);
     }
     return;
   }
@@ -1331,10 +1034,7 @@ function handleDestinationDialogClick(dialog, event) {
   const clickedLabel = getElementText(clickedControl);
   state.lastInteractedCandidate = clickedControl;
   state.pendingSelectionLabel = clickedLabel;
-  void writeSelectionDebug('generic-candidate-click', dialog, clickedControl, {
-    clickedLabel,
-  });
-  scheduleBreadcrumbDestinationCapture(dialog, clickedLabel, 'generic-candidate-click');
+  scheduleBreadcrumbDestinationCapture(dialog, clickedLabel);
 }
 
 function wireDestinationDialog(dialog, type) {
@@ -1364,11 +1064,7 @@ function wireDestinationDialog(dialog, type) {
     ) {
       const activeLabel = getElementText(document.activeElement);
       state.pendingSelectionLabel = activeLabel;
-      void writeSelectionDebug('navigator-keydown', dialog, document.activeElement, {
-        key: event.key,
-        activeLabel,
-      });
-      scheduleBreadcrumbDestinationCapture(dialog, activeLabel, 'navigator-keydown');
+      scheduleBreadcrumbDestinationCapture(dialog, activeLabel);
     }
 
     if (event.key === 'Enter') {
@@ -1378,7 +1074,6 @@ function wireDestinationDialog(dialog, type) {
     }
   }, true);
 
-  void writeDialogDebug('wire-dialog', dialog, { type });
   void restoreDestinationForDialog(dialog);
 }
 
@@ -1386,7 +1081,6 @@ let destinationDialogScanScheduled = false;
 
 function scanDestinationDialogs() {
   findOpenDestinationDialogs().forEach(({ type, dialog }) => {
-    void writeDialogDebug('scan-found-dialog', dialog, { type });
     wireDestinationDialog(dialog, type);
   });
 }
@@ -1405,7 +1099,7 @@ function initializeDestinationDialogs() {
   if (destinationDialogsInitialized) return;
 
   destinationStore.ready = destinationStore.ready || loadStoredDestinations();
-  void writeDebugStorageMarker();
+  void cleanupLegacyDebugStorage();
 
   if (!document.body) {
     document.addEventListener('DOMContentLoaded', initializeDestinationDialogs, { once: true });
@@ -1427,8 +1121,7 @@ function initializeDestinationDialogs() {
   scheduleDestinationDialogScan();
 }
 
-function startDestinationDialogWatch(reason) {
-  void writeDialogDebug('start-watch', document.body || document.documentElement, { reason });
+function startDestinationDialogWatch() {
   scheduleDestinationDialogScan();
 
   [150, 400, 900].forEach((delay) => {
@@ -1446,7 +1139,7 @@ function selectAll() {
   const allSelected = Array.from(checkboxes).every(cb => cb.classList.contains('checked'));
 
   if (allSelected) {
-    const deselectButton = document.querySelector('.synofoto-icon-button[data-tooltip-content="Annuleren"]');
+    const deselectButton = findButtonByTooltip('.synofoto-icon-button', actionTexts.cancel);
     if (deselectButton) {
       deselectButton.click();
       return;
@@ -1460,11 +1153,11 @@ function selectAll() {
 
 // Action: Add Tags (Shift + T)
 function addTags() {
-  const editTagsButton = findButton('button.synofoto-menu-text-button', 'Edit tags');
+  const editTagsButton = findButton('button.synofoto-menu-text-button', actionTexts.editTags);
   if (editTagsButton) {
     editTagsButton.click();
   } else {
-    const infoButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Informatie"]');
+    const infoButton = findButtonByTooltip('.synofoto-lightbox-toolbar-right-button', actionTexts.information);
     if (infoButton) {
       infoButton.click();
       setTimeout(() => {
@@ -1477,49 +1170,48 @@ function addTags() {
 
 // Action: Rotate (Shift + R)
 function rotate() {
-  const rotateButton = findButton('.synofoto-menu-text-button', 'Draaien');
+  const rotateButton = findButton('.synofoto-menu-text-button', actionTexts.rotate);
   if (rotateButton) rotateButton.click();
 }
 
 // Action: Add to Album (Shift + A)
 function addToAlbum() {
-  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Toevoegen aan Album"]');
+  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', actionTexts.addToAlbum);
   if (selectionButton) {
     selectionButton.click();
   } else {
-    const lightboxButton = findButton('.synofoto-menu-text-button', 'Toevoegen aan album');
+    const lightboxButton = findButton('.synofoto-menu-text-button', actionTexts.addToAlbum);
     if (lightboxButton) lightboxButton.click();
   }
 }
 
 // Action: Copy To (Shift + C)
 function copyTo() {
-  const buttonTexts = ['Kopi\u00ebren naar', 'Copy to'];
-  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', buttonTexts);
+  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', actionTexts.copyTo);
   if (selectionButton) {
     selectionButton.click();
   } else {
-    const lightboxButton = findButton('.synofoto-menu-text-button', buttonTexts);
+    const lightboxButton = findButton('.synofoto-menu-text-button', actionTexts.copyTo);
     if (lightboxButton) lightboxButton.click();
   }
 
-  startDestinationDialogWatch('copy-shortcut');
+  startDestinationDialogWatch();
 }
 
 // Action: Open Delete Dialog (Shift + Delete or Shift + Back NORMSPACE)
 function deleteDialog() {
-  const selectionButton = document.querySelector('.synofoto-selected-bar-button[data-tooltip-content="Verwijderen"]');
+  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', actionTexts.delete);
   if (selectionButton) {
     selectionButton.click();
   } else {
-    const lightboxButton = document.querySelector('.synofoto-lightbox-toolbar-right-button[data-tooltip-content="Verwijderen"]');
+    const lightboxButton = findButtonByTooltip('.synofoto-lightbox-toolbar-right-button', actionTexts.delete);
     if (lightboxButton) lightboxButton.click();
   }
 }
 
 // Action: Download (Shift + D)
 function download() {
-  const selectViewDownloadButton = findButton('.synofoto-menu-text-button', 'Origineel')
+  const selectViewDownloadButton = findButton('.synofoto-menu-text-button', actionTexts.original)
   if (selectViewDownloadButton) {
     selectViewDownloadButton.click();
   }
