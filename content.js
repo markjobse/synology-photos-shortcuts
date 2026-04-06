@@ -24,6 +24,25 @@ function getElementText(element) {
   );
 }
 
+function getElementTextVariants(element) {
+  if (!element) return [];
+
+  const variants = dedupeTextList([
+    element.getAttribute?.('aria-label'),
+    element.getAttribute?.('title'),
+    element.getAttribute?.('data-path'),
+    element.getAttribute?.('data-name'),
+    element.getAttribute?.('data-label'),
+    element.querySelector?.('.button-text')?.textContent,
+    element.querySelector?.('[class*="label"]')?.textContent,
+    element.querySelector?.('[class*="name"]')?.textContent,
+    element.querySelector?.('[class*="title"]')?.textContent,
+    element.textContent,
+  ].flatMap(value => splitDestinationPath(value)));
+
+  return variants.filter(text => text && !isIgnoredDestinationText(text));
+}
+
 function matchesAnyText(value, texts) {
   const normalizedValue = normalizeKey(value);
   return texts.some(text => normalizeKey(text) === normalizedValue);
@@ -70,6 +89,7 @@ const debugStorageKey = 'synologyPhotosShortcuts:debugMarker';
 const debugSelectionStorageKey = 'synologyPhotosShortcuts:debugSelection';
 const debugDialogStorageKey = 'synologyPhotosShortcuts:debugDialog';
 const debugBreadcrumbStorageKey = 'synologyPhotosShortcuts:debugBreadcrumbs';
+const debugRestoreStorageKey = 'synologyPhotosShortcuts:debugRestore';
 const destinationNavigatorSelector = '.synofoto-folder-navigator, .synofoto-folder-navigation-table';
 const destinationNavigatorItemSelector = [
   '[role="treeitem"]',
@@ -363,6 +383,25 @@ async function writeBreadcrumbDebug(dialog, reason, extra = {}) {
   );
 }
 
+async function writeRestoreDebug(dialog, reason, extra = {}) {
+  await saveToExtensionStorage(debugRestoreStorageKey, {
+    reason,
+    savedAt: new Date().toISOString(),
+    href: window.location.href,
+    currentPath: getCurrentDestinationPathSegments(dialog),
+    breadcrumbPath: getDestinationBreadcrumbPath(dialog),
+    selectedDestination: captureSelectedDestination(dialog),
+    visibleCandidates: collectDestinationCandidates(dialog)
+      .slice(0, 15)
+      .map(candidateElement => ({
+        text: getElementText(candidateElement),
+        variants: getElementTextVariants(candidateElement),
+        classes: getElementClasses(candidateElement),
+      })),
+    extra,
+  });
+}
+
 function getStoredDestination(type) {
   return destinationStore.values[getDestinationScope()]?.[type] || null;
 }
@@ -570,6 +609,10 @@ function getDestinationPathSegments(destination) {
   return segments;
 }
 
+function getDestinationRestoreSegments(destination) {
+  return getDestinationPathSegments(destination);
+}
+
 function stripRootDestinationSegments(segments) {
   if (segments.length > 1 && isRootDestinationSegment(segments[0])) {
     return segments.slice(1);
@@ -763,10 +806,14 @@ function findDestinationCandidateByLabel(dialog, label) {
   if (!normalizedLabel) return null;
 
   const candidates = collectDestinationCandidates(dialog);
-  const exactMatch = candidates.find(candidate => normalizeKey(getElementText(candidate)) === normalizedLabel);
+  const exactMatch = candidates.find(candidate => (
+    getElementTextVariants(candidate).some(variant => normalizeKey(variant) === normalizedLabel)
+  ));
   if (exactMatch) return exactMatch;
 
-  return candidates.find(candidate => normalizeKey(getElementText(candidate)).includes(normalizedLabel)) || null;
+  return candidates.find(candidate => (
+    getElementTextVariants(candidate).some(variant => normalizeKey(variant).includes(normalizedLabel))
+  )) || null;
 }
 
 function getRestoreLabels(destination) {
@@ -913,9 +960,72 @@ async function restoreDestinationForDialog(dialog) {
   const storedDestination = getStoredDestination(state.type);
   if (!storedDestination) return;
 
+  state.restoreConfirmedPrefixLength = 0;
   let attempts = 0;
-  const restoreSegments = getDestinationPathSegments(storedDestination);
+  const restoreSegments = getDestinationRestoreSegments(storedDestination);
   if (restoreSegments.length === 0) return;
+
+  const scheduleTryRestore = (delay) => {
+    window.setTimeout(tryRestore, delay);
+  };
+
+  const waitForRestoreProgress = (clickedSegmentIndex, clickedSegment, baselinePath) => {
+    let checks = 0;
+
+    const checkProgress = () => {
+      if (!document.contains(dialog)) return;
+
+      const latestState = destinationDialogState.get(dialog);
+      if (!latestState || latestState.restoreComplete) return;
+
+      const currentPath = getCurrentDestinationPathSegments(dialog);
+      const currentSelection = captureSelectedDestination(dialog);
+      const currentPathLength = getCommonDestinationPathLength(currentPath, restoreSegments);
+      const isFinalSegment = clickedSegmentIndex >= restoreSegments.length - 1;
+      const pathChanged = normalizeKey(currentPath.join('/')) !== normalizeKey(baselinePath.join('/'));
+      const pathAdvanced = pathChanged && currentPathLength > clickedSegmentIndex;
+      const finalSegmentSelected = isFinalSegment
+        && currentSelection
+        && normalizeKey(currentSelection.label) === normalizeKey(clickedSegment);
+
+      if (pathAdvanced || finalSegmentSelected) {
+        latestState.restoreConfirmedPrefixLength = Math.max(
+          latestState.restoreConfirmedPrefixLength || 0,
+          currentPathLength,
+        );
+        void writeRestoreDebug(dialog, 'restore-progress-detected', {
+          clickedSegmentIndex,
+          clickedSegment,
+          baselinePath,
+          currentPath,
+          currentSelection,
+          pathChanged,
+          confirmedPrefixLength: latestState.restoreConfirmedPrefixLength,
+        });
+        scheduleTryRestore(250);
+        return;
+      }
+
+      checks += 1;
+      if (checks < 10) {
+        window.setTimeout(checkProgress, 250);
+        return;
+      }
+
+      void writeRestoreDebug(dialog, 'restore-no-progress', {
+        clickedSegmentIndex,
+        clickedSegment,
+        baselinePath,
+        currentPath,
+        currentSelection,
+        pathChanged,
+        confirmedPrefixLength: latestState.restoreConfirmedPrefixLength || 0,
+      });
+      scheduleTryRestore(700);
+    };
+
+    window.setTimeout(checkProgress, 250);
+  };
 
   const tryRestore = () => {
     if (!document.contains(dialog)) return;
@@ -928,6 +1038,7 @@ async function restoreDestinationForDialog(dialog) {
     const currentPath = getCurrentDestinationPathSegments(dialog);
     const currentSelection = captureSelectedDestination(dialog);
     const currentPathLength = getCommonDestinationPathLength(currentPath, restoreSegments);
+    const confirmedPrefixLength = latestState.restoreConfirmedPrefixLength || 0;
     const currentPathMatchesTarget = currentPathLength === restoreSegments.length
       && currentPath.length === restoreSegments.length;
 
@@ -941,19 +1052,44 @@ async function restoreDestinationForDialog(dialog) {
         destination: storedDestination,
         restoreSegments,
         currentPath,
+        confirmedPrefixLength,
       });
       return;
     }
 
-    const nextSegmentIndex = Math.min(currentPathLength, restoreSegments.length - 1);
+    const nextSegmentIndex = Math.min(confirmedPrefixLength, restoreSegments.length - 1);
     const nextSegment = restoreSegments[nextSegmentIndex];
+    void writeRestoreDebug(dialog, 'restore-attempt', {
+      destination: storedDestination,
+      restoreSegments,
+      currentPath,
+      currentPathLength,
+      confirmedPrefixLength,
+      nextSegmentIndex,
+      nextSegment,
+      attempts,
+    });
     const candidate = findDestinationCandidateByLabel(dialog, nextSegment);
 
     if (candidate) {
       latestState.lastInteractedCandidate = candidate;
+      try {
+        candidate.scrollIntoView({ block: 'nearest' });
+      } catch (_error) {
+        // Ignore scroll errors; clicking is still attempted below.
+      }
       candidate.click();
       latestState.lastCapturedDestination = buildDestinationFromElement(dialog, candidate) || latestState.lastCapturedDestination;
 
+      void writeRestoreDebug(dialog, 'restore-segment-click', {
+        destination: storedDestination,
+        restoreSegments,
+        currentPath,
+        currentPathLength,
+        confirmedPrefixLength,
+        nextSegmentIndex,
+        nextSegment,
+      });
       void writeSelectionDebug('restore-segment-click', dialog, candidate, {
         destination: storedDestination,
         restoreSegments,
@@ -963,17 +1099,36 @@ async function restoreDestinationForDialog(dialog) {
       });
 
       attempts = 0;
-
-      if (nextSegmentIndex >= restoreSegments.length - 1) {
-        latestState.restoreComplete = true;
-        latestState.restoreInProgress = false;
-        return;
-      }
-
-      window.setTimeout(tryRestore, 350);
+      latestState.restoreInProgress = false;
+      waitForRestoreProgress(nextSegmentIndex, nextSegment, currentPath);
       return;
     }
 
+    if (currentPathLength > confirmedPrefixLength) {
+      latestState.restoreConfirmedPrefixLength = currentPathLength;
+      latestState.restoreInProgress = false;
+      void writeRestoreDebug(dialog, 'restore-adopt-current-path', {
+        destination: storedDestination,
+        restoreSegments,
+        currentPath,
+        currentPathLength,
+        confirmedPrefixLength,
+        adoptedPrefixLength: currentPathLength,
+      });
+      scheduleTryRestore(250);
+      return;
+    }
+
+    void writeRestoreDebug(dialog, 'restore-segment-miss', {
+      destination: storedDestination,
+      restoreSegments,
+      currentPath,
+      currentPathLength,
+      confirmedPrefixLength,
+      nextSegmentIndex,
+      nextSegment,
+      attempts,
+    });
     void writeSelectionDebug('restore-segment-miss', dialog, latestState.lastInteractedCandidate, {
       destination: storedDestination,
       restoreSegments,
@@ -987,14 +1142,21 @@ async function restoreDestinationForDialog(dialog) {
 
     attempts += 1;
     if (!latestState.restoreComplete && attempts < 14) {
-      window.setTimeout(tryRestore, 250);
+      latestState.restoreInProgress = false;
+      scheduleTryRestore(400);
       return;
     }
 
     latestState.restoreInProgress = false;
+    void writeRestoreDebug(dialog, 'restore-give-up', {
+      destination: storedDestination,
+      restoreSegments,
+      currentPath,
+      attempts,
+    });
   };
 
-  window.setTimeout(tryRestore, 150);
+  scheduleTryRestore(250);
 }
 
 function handleDestinationDialogClick(dialog, event) {
@@ -1053,6 +1215,7 @@ function wireDestinationDialog(dialog, type) {
     lastCapturedDestination: null,
     lastInteractedCandidate: null,
     pendingSelectionLabel: null,
+    restoreConfirmedPrefixLength: 0,
     restoreComplete: false,
     restoreInProgress: false,
   });
