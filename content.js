@@ -187,6 +187,7 @@ const actionTexts = {
   rotate: ['Draaien', 'Rotate'],
   addToAlbum: ['Toevoegen aan Album', 'Toevoegen aan album', 'Add to Album', 'Add to album'],
   copyTo: destinationDialogConfigs.copy.confirmTexts,
+  moveTo: destinationDialogConfigs.move.confirmTexts,
   delete: ['Verwijderen', 'Delete'],
   original: ['Origineel', 'Original'],
 };
@@ -321,7 +322,11 @@ function cleanupLegacyDebugStorage() {
 }
 
 function getStoredDestination(type) {
-  return destinationStore.values[getDestinationScope()]?.[type] || null;
+  const scopedDestinations = destinationStore.values[getDestinationScope()] || {};
+  return scopedDestinations[type]
+    || scopedDestinations.copy
+    || scopedDestinations.move
+    || null;
 }
 
 function areDestinationsEqual(left, right) {
@@ -342,7 +347,13 @@ async function saveStoredDestination(type, destination) {
     destinationStore.values[scope] = {};
   }
 
-  destinationStore.values[scope][type] = destination;
+  const relatedTypes = type === 'copy' || type === 'move'
+    ? ['copy', 'move']
+    : [type];
+
+  relatedTypes.forEach((relatedType) => {
+    destinationStore.values[scope][relatedType] = destination;
+  });
   await persistStoredDestinations();
 }
 
@@ -1198,6 +1209,19 @@ function copyTo() {
   startDestinationDialogWatch();
 }
 
+// Action: Move To (Shift + M)
+function moveTo() {
+  const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', actionTexts.moveTo);
+  if (selectionButton) {
+    selectionButton.click();
+  } else {
+    const lightboxButton = findButton('.synofoto-menu-text-button', actionTexts.moveTo);
+    if (lightboxButton) lightboxButton.click();
+  }
+
+  startDestinationDialogWatch();
+}
+
 // Action: Open Delete Dialog (Shift + Delete or Shift + Back NORMSPACE)
 function deleteDialog() {
   const selectionButton = findButtonByTooltip('.synofoto-selected-bar-button', actionTexts.delete);
@@ -1240,6 +1264,7 @@ const actions = {
   'R': rotate,
   'A': addToAlbum,
   'C': copyTo,
+  'M': moveTo,
   'D': download,
   'Tab': changeView,
   'Delete': deleteDialog,

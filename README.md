@@ -12,12 +12,13 @@ Synology didn’t add them. This extension does.
 - `Shift + Delete` / `Shift + Backspace`: Delete photo (with confirmation)
 - `Shift + R`: Rotate clockwise
 - `Shift + C`: Copy to
+- `Shift + M`: Move to
 - `Shift + D`: Download (original, not compressed)
 - `Shift + T`: Add tags
 - `Shift + A`: Add to album
 - `Shift + Tab`: Switch folder / timeline view
 - (NEW) `1` - `5`: Rate photo (1-5 stars)
 
-The extension now also remembers the last selected destination in the copy / move dialog and tries to reselect it automatically the next time you open that dialog.
+The extension now also remembers the last selected destination in the copy / move dialog and tries to reselect it automatically the next time you open either dialog.
 
 If any shortcut stops working, just create an issue on GitHub and I’ll fix it as soon as I can.
