@@ -55,6 +55,54 @@ function isVisible(element) {
   return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
 }
 
+function waitForDelay(delay) {
+  return new Promise(resolve => window.setTimeout(resolve, delay));
+}
+
+function isScrollableElement(element) {
+  if (!element || !isVisible(element)) return false;
+
+  const style = window.getComputedStyle(element);
+  const overflowY = style.overflowY || style.overflow;
+  return ['auto', 'scroll', 'overlay'].includes(overflowY)
+    && element.scrollHeight - element.clientHeight > 24;
+}
+
+function getDestinationScrollContainers(dialog) {
+  const containers = [];
+  const navigator = findDestinationNavigator(dialog);
+  const sampleCandidate = navigator?.querySelector(destinationNavigatorItemSelector)
+    || dialog.querySelector(destinationCandidateSelector);
+
+  let current = sampleCandidate;
+  while (current && dialog.contains(current)) {
+    if (isScrollableElement(current) && !containers.includes(current)) {
+      containers.push(current);
+    }
+
+    if (current === dialog) break;
+    current = current.parentElement;
+  }
+
+  if (navigator && isScrollableElement(navigator) && !containers.includes(navigator)) {
+    containers.push(navigator);
+  }
+
+  return containers;
+}
+
+function describeDestinationScrollContainer(container) {
+  if (!container) return null;
+
+  return {
+    tagName: container.tagName,
+    classes: getElementClasses(container),
+    scrollTop: container.scrollTop,
+    clientHeight: container.clientHeight,
+    scrollHeight: container.scrollHeight,
+  };
+}
+
 // Helper to find a button by selector and text
 function findButton(selector, text) {
   const texts = Array.isArray(text) ? text : [text];
@@ -816,6 +864,81 @@ function findDestinationCandidateByLabel(dialog, label) {
   )) || null;
 }
 
+async function findDestinationCandidateByLabelWithScroll(dialog, label) {
+  const directMatch = findDestinationCandidateByLabel(dialog, label);
+  if (directMatch) {
+    return directMatch;
+  }
+
+  const scrollContainers = getDestinationScrollContainers(dialog);
+  if (scrollContainers.length === 0) {
+    return null;
+  }
+
+  const normalizedLabel = normalizeKey(label);
+  const searchSummary = {
+    label,
+    scrollContainers: scrollContainers.map(container => describeDestinationScrollContainer(container)),
+    passes: [],
+  };
+
+  for (const container of scrollContainers) {
+    const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (maxScrollTop <= 0) continue;
+
+    const step = Math.max(Math.floor(container.clientHeight * 0.85), 120);
+    const visitedPositions = new Set();
+
+    const visitPosition = async (scrollTop) => {
+      const boundedScrollTop = Math.max(0, Math.min(maxScrollTop, Math.round(scrollTop)));
+      if (visitedPositions.has(boundedScrollTop)) return;
+
+      visitedPositions.add(boundedScrollTop);
+      container.scrollTop = boundedScrollTop;
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await waitForDelay(150);
+
+      searchSummary.passes.push({
+        scrollTop: container.scrollTop,
+        visibleCandidateCount: collectDestinationCandidates(dialog).length,
+      });
+    };
+
+    await visitPosition(0);
+    let candidate = findDestinationCandidateByLabel(dialog, label);
+    if (candidate) {
+      void writeRestoreDebug(dialog, 'restore-scroll-scan-found', {
+        label,
+        normalizedLabel,
+        searchSummary,
+      });
+      return candidate;
+    }
+
+    while (container.scrollTop < maxScrollTop - 1) {
+      const nextScrollTop = Math.min(maxScrollTop, container.scrollTop + step);
+      await visitPosition(nextScrollTop);
+
+      candidate = findDestinationCandidateByLabel(dialog, label);
+      if (candidate) {
+        void writeRestoreDebug(dialog, 'restore-scroll-scan-found', {
+          label,
+          normalizedLabel,
+          searchSummary,
+        });
+        return candidate;
+      }
+    }
+  }
+
+  void writeRestoreDebug(dialog, 'restore-scroll-scan-miss', {
+    label,
+    normalizedLabel,
+    searchSummary,
+  });
+  return null;
+}
+
 function getRestoreLabels(destination) {
   return dedupeTextList([
     ...(Array.isArray(destination?.path) ? destination.path : []),
@@ -966,7 +1089,9 @@ async function restoreDestinationForDialog(dialog) {
   if (restoreSegments.length === 0) return;
 
   const scheduleTryRestore = (delay) => {
-    window.setTimeout(tryRestore, delay);
+    window.setTimeout(() => {
+      void tryRestore();
+    }, delay);
   };
 
   const waitForRestoreProgress = (clickedSegmentIndex, clickedSegment, baselinePath) => {
@@ -1027,11 +1152,11 @@ async function restoreDestinationForDialog(dialog) {
     window.setTimeout(checkProgress, 250);
   };
 
-  const tryRestore = () => {
+  const tryRestore = async () => {
     if (!document.contains(dialog)) return;
 
     const latestState = destinationDialogState.get(dialog);
-    if (!latestState || latestState.restoreComplete) return;
+    if (!latestState || latestState.restoreComplete || latestState.restoreInProgress) return;
 
     latestState.restoreInProgress = true;
 
@@ -1069,17 +1194,25 @@ async function restoreDestinationForDialog(dialog) {
       nextSegment,
       attempts,
     });
-    const candidate = findDestinationCandidateByLabel(dialog, nextSegment);
+    const candidate = await findDestinationCandidateByLabelWithScroll(dialog, nextSegment);
+    const refreshedState = destinationDialogState.get(dialog);
+
+    if (!document.contains(dialog) || !refreshedState || refreshedState.restoreComplete) {
+      if (refreshedState) {
+        refreshedState.restoreInProgress = false;
+      }
+      return;
+    }
 
     if (candidate) {
-      latestState.lastInteractedCandidate = candidate;
+      refreshedState.lastInteractedCandidate = candidate;
       try {
         candidate.scrollIntoView({ block: 'nearest' });
       } catch (_error) {
         // Ignore scroll errors; clicking is still attempted below.
       }
       candidate.click();
-      latestState.lastCapturedDestination = buildDestinationFromElement(dialog, candidate) || latestState.lastCapturedDestination;
+      refreshedState.lastCapturedDestination = buildDestinationFromElement(dialog, candidate) || refreshedState.lastCapturedDestination;
 
       void writeRestoreDebug(dialog, 'restore-segment-click', {
         destination: storedDestination,
@@ -1099,14 +1232,14 @@ async function restoreDestinationForDialog(dialog) {
       });
 
       attempts = 0;
-      latestState.restoreInProgress = false;
+      refreshedState.restoreInProgress = false;
       waitForRestoreProgress(nextSegmentIndex, nextSegment, currentPath);
       return;
     }
 
     if (currentPathLength > confirmedPrefixLength) {
-      latestState.restoreConfirmedPrefixLength = currentPathLength;
-      latestState.restoreInProgress = false;
+      refreshedState.restoreConfirmedPrefixLength = currentPathLength;
+      refreshedState.restoreInProgress = false;
       void writeRestoreDebug(dialog, 'restore-adopt-current-path', {
         destination: storedDestination,
         restoreSegments,
@@ -1129,7 +1262,7 @@ async function restoreDestinationForDialog(dialog) {
       nextSegment,
       attempts,
     });
-    void writeSelectionDebug('restore-segment-miss', dialog, latestState.lastInteractedCandidate, {
+    void writeSelectionDebug('restore-segment-miss', dialog, refreshedState.lastInteractedCandidate, {
       destination: storedDestination,
       restoreSegments,
       currentPath,
@@ -1141,13 +1274,13 @@ async function restoreDestinationForDialog(dialog) {
     });
 
     attempts += 1;
-    if (!latestState.restoreComplete && attempts < 14) {
-      latestState.restoreInProgress = false;
+    if (!refreshedState.restoreComplete && attempts < 14) {
+      refreshedState.restoreInProgress = false;
       scheduleTryRestore(400);
       return;
     }
 
-    latestState.restoreInProgress = false;
+    refreshedState.restoreInProgress = false;
     void writeRestoreDebug(dialog, 'restore-give-up', {
       destination: storedDestination,
       restoreSegments,
